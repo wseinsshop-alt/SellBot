@@ -1,4 +1,4 @@
-import asyncio, contextvars, pathlib, html, io, json, logging, math, os, re, sqlite3, time
+import asyncio, contextvars, pathlib, html, io, json, logging, math, os, re, sqlite3, time, uuid
 from datetime import datetime, timezone
 from collections import Counter
 from contextlib import closing
@@ -32,8 +32,8 @@ def Btn(text, *, style=None, **kwargs):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def _load_env():
-    for filename in ("config.env",):
-        path = os.path.join(BASE_DIR, filename)
+    for folder in dict.fromkeys((BASE_DIR, os.path.dirname(BASE_DIR))):
+        path = os.path.join(folder, "config.env")
         if os.path.exists(path):
             with open(path, encoding="utf-8") as fh:
                 for line in fh:
@@ -648,7 +648,11 @@ async def show(update, ctx, text, rows=None, photo=None):
         await send(ctx, update.effective_chat.id, text, markup, photo)
 
 async def alert(update, text):
-    try: await update.callback_query.answer(text, show_alert=True)
+    try:
+        if update.callback_query:
+            await update.callback_query.answer(text, show_alert=True)
+        elif update.effective_message:
+            await update.effective_message.reply_text(text)
     except TelegramError: pass
 
 async def notify(ctx, ids, text, markup=None):
@@ -790,12 +794,16 @@ async def toggle_notify(update, pid):
     return await alert(update, t(uid, "nf_on"))
 
 
-def promo_get(code, uid):
+def promo_get(code, uid, payment_id=None):
     p = one("SELECT * FROM promos WHERE code=? AND active=1", (code.strip().upper(),))
     if not p or (p["owner"] and p["owner"] != uid): return None, "promo_bad"
     if p["expires"] and p["expires"] < now(): return None, "promo_exp"
     if one("SELECT 1 FROM promo_uses WHERE promo_id=? AND user_id=?", (p["id"], uid)): return None, "promo_used"
-    if p["max_uses"] and p["used"] >= p["max_uses"]: return None, "promo_lim"
+    reserved = q("SELECT payer FROM payments WHERE promo_id=? AND status IN ('creating','pending','processing') "
+                 "AND id!=? AND NOT EXISTS (SELECT 1 FROM orders WHERE charge_id=payments.id)",
+                 (p["id"], payment_id or ""))
+    if any(r["payer"] == uid for r in reserved): return None, "promo_used"
+    if p["max_uses"] and p["used"] + len(reserved) >= p["max_uses"]: return None, "promo_lim"
     return p, None
 
 def promo_disc(base, promo):
@@ -1020,16 +1028,23 @@ async def create_platega_order(update, ctx, method=None):
     remaining = total - bal_used
     if remaining <= 0:
         return await pay(update, ctx)
-    tid = None
-    balance_reserved = False
+    local_id = "creating:" + uuid.uuid4().hex
     try:
         begin()
+        if promo:
+            promo, err = promo_get(promo["code"], uid)
+            if err:
+                db.execute("ROLLBACK")
+                return await alert(update, t(uid, err))
         cur = balance_change("Резерв на оплату","UPDATE users SET balance=balance-? WHERE id=? AND balance>=?", (bal_used, uid, bal_used))
         if cur.rowcount != 1:
             db.execute("ROLLBACK")
             return await render_checkout(update, ctx)
+        db.execute("INSERT INTO payments(id,payer,owner,pid,promo_id,bal_used,final,rub,method,status,ts,upd,reserved) "
+                   "VALUES(?,?,?,?,?,?,?,?,?,'creating',?,?,1)",
+                   (local_id, uid, uid, p["id"], promo["id"] if promo else 0, bal_used,
+                    remaining, remaining, method, now(), now()))
         db.execute("COMMIT")
-        balance_reserved = True
         back_url = f"https://t.me/{ctx.bot.username}"
         body = {
             "paymentMethod": method,
@@ -1045,13 +1060,14 @@ async def create_platega_order(update, ctx, method=None):
         url = data.get("redirect") or data.get("url")
         if not tid or not url:
             raise ValueError(data)
-        db.execute("INSERT INTO payments(id,payer,owner,pid,promo_id,bal_used,final,rub,method,ts,reserved) VALUES(?,?,?,?,?,?,?,?,?,?,1)",
-                   (tid, uid, uid, p["id"], promo["id"] if promo else 0, bal_used, remaining, remaining, method, now()))
-    except Exception as e:
+        cur = db.execute("UPDATE payments SET id=?, status='pending', upd=? WHERE id=? AND status='creating'",
+                         (tid, now(), local_id))
+        if cur.rowcount != 1: raise RuntimeError("Payment creation was canceled")
+    except (Exception, asyncio.CancelledError) as e:
 
         if db.in_transaction: db.execute("ROLLBACK")
-        if balance_reserved:
-            balance_change("Возврат резерва","UPDATE users SET balance=balance+? WHERE id=?", (bal_used, uid))
+        release_pending(local_id, "canceled")
+        if isinstance(e, asyncio.CancelledError): raise
         log.error("platega order create: %s", e)
         return await alert(update, t(uid, "pay_err"))
     rows = [[Btn(t(uid, "b_open_pay", v=remaining), url=url)],
@@ -1065,7 +1081,7 @@ async def pay_rub(update, ctx):
 def release_pending(tid, new_status):
     begin()
     try:
-        cur = db.execute("UPDATE payments SET status=?, upd=? WHERE id=? AND status='pending'", (new_status, now(), tid))
+        cur = db.execute("UPDATE payments SET status=?, upd=? WHERE id=? AND status IN ('creating','pending')", (new_status, now(), tid))
         row = None
         if cur.rowcount == 1:
             row = one("SELECT * FROM payments WHERE id=?", (tid,))
@@ -1162,7 +1178,10 @@ async def chk_payment(update, ctx, tid):
     except TelegramError: pass
 
 
-def recover_stuck():
+def recover_stuck(startup=False):
+    for r in q("SELECT id FROM payments WHERE status='creating' AND (upd<? OR ?)",
+               (now() - STUCK_AFTER, int(startup))):
+        release_pending(r["id"], "canceled")
     for r in q("SELECT id FROM payments WHERE status='processing' AND upd<?", (now() - STUCK_AFTER,)):
         if one("SELECT 1 FROM orders WHERE charge_id=?", (r["id"],)):
             db.execute("UPDATE payments SET status='done', upd=? WHERE id=?", (now(), r["id"]))
@@ -1209,13 +1228,17 @@ async def bg_loop(app):
 def fulfill(payer, owner, pid, promo_id, bal_used, value, stars, rub, method, charge_id, prepaid=False):
     begin()
     try:
+        if charge_id:
+            existing = one("SELECT * FROM orders WHERE charge_id=?", (charge_id,))
+            if existing:
+                db.execute("ROLLBACK"); return existing
         p = one("SELECT * FROM products WHERE id=?", (pid,))
         u = one("SELECT * FROM users WHERE id=?", (payer,))
         if not p or not u or (not prepaid and (u["balance"] or 0) < bal_used):
             db.execute("ROLLBACK"); return None
-        if method == "balance" and promo_id:
+        if promo_id:
             promo = one("SELECT code FROM promos WHERE id=?", (promo_id,))
-            if not promo or promo_get(promo["code"], payer)[1]:
+            if not promo or promo_get(promo["code"], payer, payment_id=charge_id)[1]:
                 db.execute("ROLLBACK"); return None
         ts = now(); picked = []
         k = take_key(pid)
@@ -2846,7 +2869,7 @@ async def on_error(update, ctx):
 
 
 async def post_init(app):
-
+    recover_stuck(startup=True)
     await app.bot.set_my_commands([
         BotCommand("start", "Главное меню"),
         BotCommand("cancel", "Отменить действие"),
@@ -3151,3 +3174,4 @@ async def post_shutdown(app):
 
 if __name__ == '__main__':
     main()
+

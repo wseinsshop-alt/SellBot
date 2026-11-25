@@ -111,20 +111,32 @@ sudo apt update
 sudo apt install -y python3 python3-venv
 ```
 
-Загрузите проект в `/opt/shop-bot`, сохранив структуру папок, и перейдите в него:
+### 3 · Установите SellBot на Ubuntu 24.04
+
+Потребуется **Python 3.12 или новее**. Выполни блок на чистом VPS. Он клонирует проект в `/opt/shop-bot` и установит зависимости:
 
 ```bash
+sudo apt update
+sudo apt install -y git python3.12 python3.12-venv
+sudo git clone https://github.com/wseinsshop-alt/SellBot.git /opt/shop-bot
+sudo chown -R "$USER":"$USER" /opt/shop-bot
 cd /opt/shop-bot
-python3 -m venv .venv
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
-chmod 600 config.env
 ```
 
-### 4 · Запустите SellBot
+### 4 · Заполните конфиг и запустите
+
+Открой `config.env` в простом редакторе и укажи токен от **@BotFather** и свой числовой Telegram ID:
 
 ```bash
+nano config.env
+chmod 600 config.env
 .venv/bin/python main.py
 ```
+
+Укажи значения после `BOT_TOKEN=` и `ADMIN_IDS=`, сохрани файл (`Ctrl+O`, `Enter`) и выйди (`Ctrl+X`). Не публикуй токен в GitHub. Последняя команда запускает бота в текущей SSH-сессии; для постоянной работы после выхода настрой [systemd](#hosting).
 
 Запуск `.venv/bin/python main/main.py` также поддерживается и использует ту же базу. Заполняйте корневой `config.env`. Для совместимости сначала читается `main/config.env`, если он есть, затем корневой конфиг; уже заданные переменные окружения имеют приоритет. Если оставили старый `main/config.env`, редактируйте его либо удалите после переноса значений в корневой конфиг.
 

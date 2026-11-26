@@ -17,6 +17,15 @@ class SimulatedPowerLoss(BaseException):
 
 
 class ShopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_long_product_names_keep_price_and_stock(self):
+        label = self.shop.product_label("Очень длинное название " * 15, "1299 ₽ (5 шт.)")
+        self.assertLessEqual(len(label),60)
+        self.assertIn("1299 ₽",label)
+        self.assertIn("5 шт.",label)
+        self.assertIn("…",label)
+        self.assertEqual(self.shop.short_name("  Название\n\tс пробелами\u200b  "),"Название с пробелами")
+        self.assertEqual(self.shop.Btn("  Название\nтовара  ",callback_data="prod:1").text,"Название товара")
+
     def load_shop(self):
         spec = importlib.util.spec_from_file_location("shop_under_test", self.source)
         shop = importlib.util.module_from_spec(spec)

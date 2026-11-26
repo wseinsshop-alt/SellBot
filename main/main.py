@@ -12,7 +12,18 @@ from telegram.ext import (Application, ApplicationHandlerStop, CallbackQueryHand
                           CommandHandler, ContextTypes, MessageHandler, PreCheckoutQueryHandler,
                           TypeHandler, filters)
 
+def short_name(value, limit=48):
+    value = re.sub(r"[\s\u200b-\u200f\ufeff]+", " ", str(value or "")).strip()
+    return value if len(value) <= limit else value[:max(1,limit-1)].rstrip() + "…"
+
+
+def product_label(name, detail):
+    detail = str(detail)
+    return short_name(name,max(8,60-len(detail)-3)) + " — " + detail
+
+
 def Btn(text, *, style=None, **kwargs):
+    text = short_name(text,60)
     data = str(kwargs.get("callback_data") or "")
     if style is None:
         if (data.startswith(("adm_del", "adm_prd")) or data == "cop_rm"
@@ -782,7 +793,7 @@ async def section(update, ctx, sid):
     s = one("SELECT * FROM sections WHERE id=?", (sid,))
     if not s: return await catalog(update, ctx)
     prods = q("SELECT * FROM products WHERE section_id=? AND delivery_type IN ('key','file') ORDER BY pinned DESC, sort_order ASC, id DESC", (sid,))
-    rows = [[Btn(f"{p['name']} — {rub_amount(p, p['price'])} ₽ ({stock_txt(stock(p['id']))})"[:60], callback_data=f"prod:{p['id']}")]
+    rows = [[Btn(product_label(p["name"], f"{rub_amount(p, p['price'])} ₽ ({stock_txt(stock(p['id']))})"), callback_data=f"prod:{p['id']}")]
             for p in prods] + [back_row(uid, "cat")]
     await show(update, ctx, f"<b>{esc(s['name'])}</b>\n\n{esc(s['description'] or '')}\n\n{t(uid, 'sec_pick')}", rows, photo=s["photo"])
 
@@ -1760,7 +1771,7 @@ async def adm_sec(update, ctx, sid):
     s = one("SELECT * FROM sections WHERE id=?", (sid,))
     if not s: return await adm_cat(update, ctx)
     prods = q("SELECT * FROM products WHERE section_id=? ORDER BY pinned DESC, sort_order ASC, id DESC", (sid,))
-    rows = [[Btn(f"{'📌 ' if p['pinned'] else '📦 '}{p['name']} — {rub_amount(p, p['price'])} ₽", callback_data=f"adm_prod:{p['id']}")] for p in prods]
+    rows = [[Btn(product_label(("📌 " if p["pinned"] else "📦 ") + p["name"], f"{rub_amount(p, p['price'])} ₽"), callback_data=f"adm_prod:{p['id']}")] for p in prods]
     rows.append([Btn("➕ Добавить товар", callback_data=f"adm_addprod:{sid}")])
     rows.append([Btn("✏️ Название раздела", callback_data=f"adm_editsec:{sid}")])
     rows.append([Btn("📝 Описание раздела", callback_data=f"adm_secdesc:{sid}")])
@@ -2437,7 +2448,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await adm_prod(update, ctx, pid)
     if st == "adm_editname":
         pid = ctx.user_data.get("sd", {}).get("pid")
-        name = txt.strip()
+        name = short_name(txt,200)
         if not name:
             ctx.user_data["state"] = "adm_editname"
             return await update.message.reply_text("Название не может быть пустым. Попробуйте ещё раз.")
@@ -2446,7 +2457,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         db.execute("UPDATE products SET name=? WHERE id=?", (name[:200], pid))
         return await adm_prod(update, ctx, pid)
     if st == "adm_sec_name":
-        name = txt.strip()
+        name = short_name(txt,200)
         if not name:
             ctx.user_data["state"] = "adm_sec_name"
             return await update.message.reply_text("Название не может быть пустым.")
@@ -2454,7 +2465,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await adm_cat(update, ctx)
     if st == "adm_editsec":
         sid = ctx.user_data.get("sd", {}).get("sid")
-        name = txt.strip()
+        name = short_name(txt,200)
         if not name:
             ctx.user_data["state"] = "adm_editsec"
             return await update.message.reply_text("Название не может быть пустым.")

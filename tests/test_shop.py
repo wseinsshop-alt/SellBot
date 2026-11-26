@@ -85,6 +85,35 @@ class ShopTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(os.environ["BOT_TOKEN"], "local-token")
             self.assertEqual(os.environ["ADMIN_IDS"], "456")
 
+    def test_external_data_directory_and_backup(self):
+        data = Path(self.temp.name) / "private-data"
+        spec = importlib.util.spec_from_file_location("external_shop", self.source)
+        external = importlib.util.module_from_spec(spec)
+        with patch.dict(os.environ, {"SELLBOT_DATA_DIR": str(data)}, clear=True):
+            spec.loader.exec_module(external)
+        try:
+            self.assertEqual(Path(external.DB_FILE), data / "shop.db")
+            self.assertTrue((data / "shop.db").exists())
+            self.assertEqual(external.create_backup(force=True).parent, data / "backups")
+        finally:
+            external.db.close()
+
+    def test_telegram_token_redacted_from_log_messages_and_exceptions(self):
+        import logging
+        token = self.shop.BOT_TOKEN
+        record = logging.LogRecord("httpx", logging.ERROR, __file__, 1,
+                                   "POST https://api.telegram.org/bot%s/getMe", (token,), None)
+        self.shop.SecretFilter().filter(record)
+        self.assertNotIn(token, record.getMessage())
+        self.assertIn("[BOT_TOKEN]", record.getMessage())
+        try:
+            raise RuntimeError("request failed: " + token)
+        except RuntimeError:
+            import sys
+            record = logging.LogRecord("shop", logging.ERROR, __file__, 1, "error", (), sys.exc_info())
+        self.shop.SecretFilter().filter(record)
+        self.assertNotIn(token, record.exc_text)
+
     async def test_reserve_and_payment_are_durable_before_gateway_call(self):
         async def gateway(body):
             row = self.shop.one("SELECT * FROM payments WHERE status='creating'")

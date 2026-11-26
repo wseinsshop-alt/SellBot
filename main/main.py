@@ -46,7 +46,9 @@ _load_env()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").replace(";", ",").split(",")
              if x.lstrip("-").isdigit()}
-DB_FILE = os.path.join(BASE_DIR, "shop.db")
+DATA_DIR = os.path.abspath(os.path.expanduser(os.getenv("SELLBOT_DATA_DIR") or BASE_DIR))
+os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+DB_FILE = os.path.join(DATA_DIR, "shop.db")
 REPLACE_DAYS = 7
 MAX_PAYMENT_RUB = 10_000
 MAX_KEYS_FILE_BYTES = 2 * 1024 * 1024
@@ -54,6 +56,31 @@ MAX_IMPORT_KEYS = 10_000
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 log = logging.getLogger("shop")
+
+
+class SecretFilter(logging.Filter):
+    """Keep Telegram credentials out of application and HTTP client logs."""
+    def filter(self, record):
+        text = record.getMessage()
+        if BOT_TOKEN:
+            text = text.replace(BOT_TOKEN, "[BOT_TOKEN]")
+        record.msg = re.sub(r"bot\d+:[A-Za-z0-9_-]+", "bot[BOT_TOKEN]", text)
+        record.args = ()
+        # Exception text can contain a request URL, including the token.
+        if record.exc_info:
+            record.exc_text = self._safe_exception(record.exc_info)
+            record.exc_info = None
+        return True
+
+    @staticmethod
+    def _safe_exception(info):
+        text = logging.Formatter().formatException(info)
+        return text.replace(BOT_TOKEN, "[BOT_TOKEN]") if BOT_TOKEN else text
+
+
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(SecretFilter())
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 db = sqlite3.connect(DB_FILE, check_same_thread=False, isolation_level=None)
@@ -3113,7 +3140,7 @@ async def deliver_order(ctx,chat_id,o,head=None):
     await send(ctx,chat_id,"🛍 Нужен ещё один?",Markup([[Btn("Купить повторно",callback_data=f"prod:{o['product_id']}")]]))
 
 def create_backup(force=False):
-    folder=pathlib.Path(BASE_DIR)/'backups'; folder.mkdir(mode=0o700,exist_ok=True)
+    folder=pathlib.Path(DATA_DIR)/'backups'; folder.mkdir(mode=0o700,exist_ok=True)
     stamp=datetime.now(timezone.utc).strftime('%Y-%m-%d')
     path=folder/f'shop-{stamp}.db'
     if path.exists() and not force: return path
@@ -3137,7 +3164,7 @@ async def extension_tick(app):
 
 def create_backup_threadsafe():
 
-    folder=pathlib.Path(BASE_DIR)/'backups'; folder.mkdir(mode=0o700,exist_ok=True)
+    folder=pathlib.Path(DATA_DIR)/'backups'; folder.mkdir(mode=0o700,exist_ok=True)
     path=folder/f"shop-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.db"
     if path.exists(): return
     tmp=folder/'.daily.tmp'
